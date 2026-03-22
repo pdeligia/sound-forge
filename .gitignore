@@ -1,0 +1,10 @@
+# Dependencies
+__pycache__/
+*.pyc
+.venv/
+
+# Output
+tmp/
+
+# OS
+.DS_Store
