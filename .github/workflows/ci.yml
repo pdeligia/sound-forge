@@ -17,3 +17,9 @@ jobs:
 
       - name: Install dependencies
         run: uv sync
+
+      - name: Verify imports
+        run: |
+          uv run python -c "from tools.lib.console import console; print('console ok')"
+          uv run python -c "from tools.lib.audio_utils import load_audio, save_audio; print('audio_utils ok')"
+          uv run python -c "from tools.lib.model_utils import get_device; print('model_utils ok')"
