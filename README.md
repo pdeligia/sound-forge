@@ -21,8 +21,9 @@ uv sync
 
 | Tool | Description |
 |------|-------------|
+| `convert-audio` | Convert between audio formats (WAV, FLAC, OGG, MP3, M4A) and resample |
 | `gen-music` | Generate music from a text prompt using MusicGen |
 | `loop-music` | Post-process a track for seamless looping (crossfade, fade-through-silence, or trim modes) |
-| `convert-audio` | Convert between audio formats (WAV, FLAC, OGG, MP3, M4A) and resample |
+| `trim-audio` | Trim seconds from the start and/or end of an audio clip |
 
 > **Copilot skills** for each tool are available in [`.github/skills/`](.github/skills/) — these provide detailed usage docs, options, examples, and related tool references.
