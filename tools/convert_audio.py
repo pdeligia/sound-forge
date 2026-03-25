@@ -21,6 +21,11 @@ SUPPORTED_FORMATS = {
 }
 
 
+def _n_samples_static(data: np.ndarray) -> int:
+    """Return number of samples (works for both mono 1D and stereo 2D arrays)."""
+    return data.shape[-1] if data.ndim > 1 else data.shape[0]
+
+
 def to_mono(data: np.ndarray) -> np.ndarray:
     """Down-mix multi-channel audio to mono by averaging channels."""
     if data.ndim == 1:
@@ -65,7 +70,18 @@ def save_with_format(path: str, data: np.ndarray, sample_rate: int) -> None:
         import subprocess
         import tempfile
 
-        # Write a temporary WAV, then use macOS afconvert for AAC encoding
+        # AAC encoders add priming silence (~2112 samples at 44100Hz) at the
+        # start of the file. For seamless looping, we prepend samples from the
+        # end of the audio so that after decoding the priming region contains
+        # real audio instead of silence.
+        AAC_PRIMING_SAMPLES = 2112
+        priming = min(AAC_PRIMING_SAMPLES, _n_samples_static(data) // 2)
+        if priming > 0:
+            if data.ndim == 2:
+                data = np.concatenate([data[:, -priming:], data], axis=1)
+            else:
+                data = np.concatenate([data[-priming:], data])
+
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             tmp_path = tmp.name
         try:

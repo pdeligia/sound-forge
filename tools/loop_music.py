@@ -128,7 +128,7 @@ def crossfade_loop(audio, crossfade_samples):
 
 
 def fade_loop(audio, fade_samples, silence_samples=0):
-    """Create a loop by fading out at the end and fading in at the start.
+    """Create a loop by fading in at the start and fading out at the end.
 
     The transition passes through a silence gap, so it works on any track
     regardless of how different the start and end sound.
