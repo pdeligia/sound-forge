@@ -66,6 +66,13 @@ def resample(data: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
     return resampled
 
 
+def remove_dc_offset(data: np.ndarray) -> np.ndarray:
+    """Remove DC offset by subtracting the mean from each channel."""
+    if data.ndim > 1:
+        return data - np.mean(data, axis=1, keepdims=True)
+    return data - np.mean(data)
+
+
 def highpass_filter(data: np.ndarray, sample_rate: int, cutoff_hz: float = 150.0) -> np.ndarray:
     """Apply a high-pass filter to remove low-frequency rumble/hum.
 

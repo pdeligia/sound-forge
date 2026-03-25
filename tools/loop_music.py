@@ -8,7 +8,7 @@ import time
 import numpy as np
 from rich.table import Table
 
-from tools.lib.audio_utils import load_audio, save_audio, compute_peak, compute_rms, get_duration
+from tools.lib.audio_utils import load_audio, save_audio, compute_peak, compute_rms, get_duration, remove_dc_offset
 from tools.lib.console import console
 
 
@@ -104,27 +104,35 @@ def find_best_loop_region(audio, sample_rate, min_loop_seconds=3.0):
 
 
 def crossfade_loop(audio, crossfade_samples):
-    """Create a seamless loop by crossfading the end of the track into the beginning.
+    """Create a seamless loop using overlap-add crossfade.
 
-    Keeps the full track length. The last crossfade_samples blend with the first
-    crossfade_samples so the track loops seamlessly end→start.
+    Overlaps the tail of the track with the head so the loop point is truly
+    seamless: adjacent samples in the original audio stay adjacent across the
+    seam.  Output is shorter by crossfade_samples (the head and tail collapse
+    into one crossfade region).
+    Uses equal-power (sinusoidal) curves to prevent energy dips in the blend.
     Works with both mono (1D) and stereo (2D) audio.
     """
     n = _n_samples(audio)
     fade_len = min(crossfade_samples, n // 2)
 
-    result = audio.copy()
+    # Equal-power curves: cos²+sin²=1 preserves energy through the crossfade
+    t = np.linspace(0.0, np.pi / 2, fade_len, dtype=np.float32)
+    fade_out = np.cos(t)
+    fade_in = np.sin(t)
 
-    fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
-    fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
-
-    # Blend: end of track fades out while beginning fades in
     if audio.ndim > 1:
-        result[:, -fade_len:] = result[:, -fade_len:] * fade_out + result[:, :fade_len] * fade_in
+        head = audio[:, :fade_len]
+        body = audio[:, fade_len:n - fade_len]
+        tail = audio[:, n - fade_len:]
+        xfade = tail * fade_out + head * fade_in
+        return np.concatenate([body, xfade], axis=1)
     else:
-        result[-fade_len:] = result[-fade_len:] * fade_out + result[:fade_len] * fade_in
-
-    return result
+        head = audio[:fade_len]
+        body = audio[fade_len:n - fade_len]
+        tail = audio[n - fade_len:]
+        xfade = tail * fade_out + head * fade_in
+        return np.concatenate([body, xfade])
 
 
 def fade_loop(audio, fade_samples, silence_samples=0):
@@ -232,6 +240,7 @@ def main():
 
     console.print("  Loading audio...")
     audio, sample_rate = load_audio(args.input)
+    audio = remove_dc_offset(audio)
     original_duration = get_duration(audio, sample_rate)
     is_stereo = audio.ndim == 2
     console.print(f"  Loaded [cyan]{original_duration:.1f}s[/cyan] at [cyan]{sample_rate}Hz[/cyan]"
