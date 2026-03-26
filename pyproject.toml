@@ -18,6 +18,7 @@ dependencies = [
 
 [project.scripts]
 gen-music = "tools.gen_music:main"
+gen-sfx = "tools.gen_sfx:main"
 loop-music = "tools.loop_music:main"
 trim-audio = "tools.trim_audio:main"
 convert-audio = "tools.convert_audio:main"

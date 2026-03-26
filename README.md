@@ -17,12 +17,11 @@ uv sync
 
 ## Tools
 
-### Soundtrack Pipeline
-
 | Tool | Description |
 |------|-------------|
 | `convert-audio` | Convert between audio formats (WAV, FLAC, OGG, MP3, M4A) and resample |
 | `gen-music` | Generate music from a text prompt using MusicGen |
+| `gen-sfx` | Generate sound effects from a text prompt using AudioGen |
 | `loop-music` | Post-process a track for seamless looping (crossfade, fade-through-silence, or trim modes) |
 | `trim-audio` | Trim seconds from the start and/or end of an audio clip |
 
