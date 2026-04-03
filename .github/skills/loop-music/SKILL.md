@@ -29,7 +29,7 @@ uv run loop-music <input.wav> [options]
 ## Modes
 
 ### `crossfade` (default)
-Blends the end of the track into the beginning using a linear crossfade. Keeps the full track length. Works best when the start and end of the track sound similar.
+Blends the end of the track into the beginning using an equal-power crossfade. Keeps the full track length. Works best when the start and end of the track sound similar.
 
 ### `fade`
 Fades out at the end and fades in at the start, transitioning through silence. Uses equal-power (sinusoidal) curves for natural volume changes. Works on any track regardless of how different the start and end sound. Use `--silence-ms` to add a gap of silence between loops.

@@ -1,11 +1,11 @@
 ---
 name: gen-sfx
-description: Generate sound effects from a text prompt using AudioGen AI. Use this skill when the user wants to create weapon sounds, monster cries, environmental audio, footsteps, explosions, or any non-musical audio assets for games from a text description.
+description: Generate sound effects from a text prompt using Stable Audio Open AI. Use this skill when the user wants to create weapon sounds, monster cries, environmental audio, footsteps, explosions, or any non-musical audio assets for games from a text description.
 ---
 
 # gen-sfx
 
-A Python tool for generating sound effects from a text prompt using Meta's AudioGen model (via HuggingFace Transformers).
+A Python tool for generating sound effects from a text prompt using Stable Audio Open (via HuggingFace Diffusers).
 
 ## How to Run
 ```bash
@@ -20,28 +20,27 @@ uv run gen-sfx "<prompt>" [options]
 ## Options
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--duration N` | `3` | Duration in seconds |
-| `--model-size SIZE` | `medium` | Model size: `medium` (currently the only AudioGen size available) |
-| `--temperature N` | `1.0` | Sampling temperature — higher = more varied |
-| `--guidance-scale N` | `3.0` | Classifier-free guidance — higher = closer to prompt |
-| `--top-k N` | `250` | Top-k sampling |
-| `--top-p N` | `0.92` | Nucleus sampling threshold |
+| `--duration N` | `3` | Duration in seconds (max 47) |
+| `--steps N` | `100` | Inference steps — higher = better quality, slower |
+| `--guidance-scale N` | `7.0` | Classifier-free guidance — higher = closer to prompt |
+| `--negative-prompt TEXT` | `low quality, noise, distortion` | Negative prompt to steer away from |
+| `--seed N` | random | Random seed for reproducibility |
 | `--highpass N` | `0` | High-pass filter cutoff in Hz, 0 to disable |
-| `--count N` | `1` | Generate N variants and keep the best |
+| `--count N` | `1` | Generate N variants and keep the best by RMS energy |
 | `--output FILE` | `./tmp/gen_sfx/output.wav` | Output WAV file path |
 
 ## Behavior
-- Loads the AudioGen model (auto-downloads on first use, cached afterward)
-- Generates audio from the text prompt using classifier-free guidance (scale 3.0)
+- Loads the Stable Audio Open pipeline (auto-downloads on first use, cached afterward)
+- Generates 44.1kHz audio via latent diffusion from the text prompt
 - Default duration is 3 seconds (typical for game SFX; increase for longer ambient effects)
-- When using `--count`, generates multiple variants and auto-selects the best based on mid+high frequency energy (most perceptually clear)
-- Outputs a WAV file with detailed stats: duration, peak/RMS levels, frequency spectrum, and performance metrics
+- When using `--count`, generates multiple variants and auto-selects the one with highest RMS energy (fullest sound)
+- Outputs a 44.1kHz mono WAV file with detailed stats: duration, peak/RMS levels, frequency spectrum, and performance metrics
 - Auto-detects MPS (Apple Silicon), CUDA, or CPU
 
 ## Models Used
-| Model | Size | Description |
-|-------|------|-------------|
-| `facebook/audiogen-medium` | ~1.5B | General-purpose sound effect generation |
+| Model | Description |
+|-------|-------------|
+| `stabilityai/stable-audio-open-1.0` | 44.1kHz stereo, up to 47s, high quality |
 
 ## Examples
 
@@ -82,11 +81,17 @@ uv run gen-sfx "thunder rumbling in the distance" --duration 4
 uv run gen-sfx "explosion with debris" --count 3 --duration 3
 ```
 
+### Reproducible output with a seed
+```bash
+uv run gen-sfx "sword clash" --seed 42 --duration 2
+```
+
 ## Tips for Good Prompts
 - Be specific about materials: "metal sword" vs just "sword"
 - Describe the action: "slashing", "clanging", "whooshing"
 - Add context: "in a cave", "echoing", "muffled"
 - Keep prompts concise but descriptive
+- Use `--negative-prompt` to avoid unwanted qualities
 - For game SFX, shorter durations (1-4s) generally work better
 
 ## Related Tools

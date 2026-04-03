@@ -3,7 +3,6 @@
 
 import argparse
 import os
-import time
 
 import numpy as np
 from rich.table import Table
@@ -22,40 +21,6 @@ def _slice(audio, start, end=None):
     if audio.ndim > 1:
         return audio[:, start:end]
     return audio[start:end]
-
-
-def find_best_loop_point(audio, sample_rate, min_loop_seconds=3.0):
-    """Find the best point to start the loop-back by comparing the end with earlier segments.
-
-    Uses cross-correlation on short windows to find where the end of the track
-    most closely matches an earlier segment, giving the smoothest possible loop.
-    Works with both mono (1D) and stereo (2D) audio by mixing down for analysis.
-    """
-    # Mix to mono for analysis if stereo
-    mono = np.mean(audio, axis=0) if audio.ndim > 1 else audio
-    n = len(mono)
-
-    window_size = int(0.5 * sample_rate)  # 0.5s comparison window
-    min_offset = int(min_loop_seconds * sample_rate)
-    end_window = mono[-window_size:]
-
-    best_score = -np.inf
-    best_pos = min_offset
-
-    # Slide through the track looking for the best match
-    step = sample_rate // 10  # check every 0.1s
-    for pos in range(min_offset, n - window_size * 2, step):
-        candidate = mono[pos:pos + window_size]
-        # Normalized cross-correlation
-        norm = np.sqrt(np.sum(end_window**2) * np.sum(candidate**2))
-        if norm < 1e-8:
-            continue
-        score = float(np.sum(end_window * candidate) / norm)
-        if score > best_score:
-            best_score = score
-            best_pos = pos
-
-    return best_pos, best_score
 
 
 def _ncc(a, b):
@@ -136,191 +101,6 @@ def find_best_loop_region(audio, sample_rate, min_loop_seconds=3.0, top_n=1, win
                 break
 
     return selected
-
-
-def find_bridge(audio, sample_rate, window_seconds=0.5, step_seconds=0.1, max_hops=4, top_n=10):
-    """Find the best chain of windows to bridge from track end → track start.
-
-    Uses dynamic programming to find paths of 1–max_hops windows where:
-      - First window matches the track's end
-      - Last window matches the track's start
-      - Each consecutive pair flows naturally (high NCC between neighbors)
-
-    Returns top_n candidates as (path, avg_score) where path is a list of
-    sample positions and avg_score is the average NCC across all hops (0–1).
-    """
-    mono = np.mean(audio, axis=0) if audio.ndim > 1 else audio
-    n = len(mono)
-
-    window = int(window_seconds * sample_rate)
-    step = max(1, int(step_seconds * sample_rate))
-    margin = window  # avoid matching the actual start/end
-
-    # Signatures
-    end_sig = mono[n - window:]
-    start_sig = mono[:window]
-
-    # Score every position against end and start signatures
-    positions = list(range(margin, n - margin - window, step))
-    end_scores = {}    # how well position matches track end
-    start_scores = {}  # how well position matches track start
-
-    for p in positions:
-        chunk = mono[p:p + window]
-        end_scores[p] = _ncc(chunk, end_sig)
-        start_scores[p] = _ncc(chunk, start_sig)
-
-    # Precompute flow scores between positions (how well p1's end flows into p2's start)
-    # Only compute for positions where p2 > p1 (forward in time)
-    # Use the overlap: last half of window at p1 vs first half of window at p2
-    half = window // 2
-
-    def flow_score(p1, p2):
-        seg1 = mono[p1 + half:p1 + window]
-        seg2 = mono[p2:p2 + half]
-        return _ncc(seg1, seg2)
-
-    # Dynamic programming: best path of length k ending at each position
-    # State: (position) -> (best_avg_score, path)
-    # For k=1: score = avg(end_score, start_score) — single hop
-    # For k>1: score = avg(end_score[first], flow_scores..., start_score[last])
-
-    all_candidates = []  # (avg_score, path)
-
-    # 1-hop: single window bridges end→start directly
-    for p in positions:
-        avg = (end_scores[p] + start_scores[p]) / 2
-        all_candidates.append((avg, [p]))
-
-    # Multi-hop: use beam search to keep it tractable
-    beam_width = 50
-    # Current beam: list of (total_score, num_edges, path)
-    # total_score = end_score[first] + sum(flow_scores)
-    # At the end we add start_score[last] and divide by (num_edges + 2)
-
-    # Initialize beam with best entry points
-    beam = []
-    for p in positions:
-        beam.append((end_scores[p], 1, [p]))
-    # Keep top beam_width by score
-    beam.sort(key=lambda x: -x[0] / x[1])
-    beam = beam[:beam_width]
-
-    for hop in range(2, max_hops + 1):
-        next_beam = []
-        for total, num_edges, path in beam:
-            last_pos = path[-1]
-            for p in positions:
-                # Must be forward and non-overlapping
-                if p <= last_pos + window:
-                    continue
-                fs = flow_score(last_pos, p)
-                new_total = total + fs
-                new_edges = num_edges + 1
-                next_beam.append((new_total, new_edges, path + [p]))
-
-        if not next_beam:
-            break
-
-        # Keep top beam_width
-        next_beam.sort(key=lambda x: -x[0] / x[1])
-        next_beam = next_beam[:beam_width]
-        beam = next_beam
-
-        # Score complete paths (add start_score for the last position)
-        for total, num_edges, path in beam:
-            last_pos = path[-1]
-            avg = (total + start_scores[last_pos]) / (num_edges + 1)
-            all_candidates.append((avg, path))
-
-    # Sort by average score descending
-    all_candidates.sort(key=lambda x: -x[0])
-
-    # Diversity selection based on path overlap
-    selected = []
-    for avg_score, path in all_candidates:
-        path_set = set()
-        for p in path:
-            for s in range(p, p + window, step):
-                path_set.add(s)
-
-        is_diverse = True
-        for _, sel_path in selected:
-            sel_set = set()
-            for p in sel_path:
-                for s in range(p, p + window, step):
-                    sel_set.add(s)
-            overlap = len(path_set & sel_set)
-            shorter = min(len(path_set), len(sel_set))
-            if shorter > 0 and overlap > 0.50 * shorter:
-                is_diverse = False
-                break
-
-        if is_diverse:
-            selected.append((avg_score, path))
-            if len(selected) >= top_n:
-                break
-
-    return selected
-
-
-def build_bridge_loop(audio, bridge_chunks, crossfade_samples):
-    """Build a loop by chaining bridge chunks between track end and start.
-
-    bridge_chunks is a list of audio arrays to chain. Crossfades are applied
-    at every seam: track→chunk1, chunk1→chunk2, ..., chunkN→track(loop).
-    """
-    fade_len = crossfade_samples
-
-    t = np.linspace(0.0, np.pi / 2, fade_len, dtype=np.float32)
-    fade_out = np.cos(t)
-    fade_in = np.sin(t)
-
-    def _xfade(a_tail, b_head):
-        """Equal-power crossfade between end of a and start of b."""
-        return a_tail * fade_out + b_head * fade_in
-
-    # Build the chain: track_body + xfade(track_end, chunk1) + chunk1_body + ... + xfade(chunkN, track_start)
-    pieces = []
-    is_stereo = audio.ndim > 1
-    n = _n_samples(audio)
-
-    # Track body (without first and last fade_len)
-    if is_stereo:
-        pieces.append(audio[:, fade_len:n - fade_len])
-    else:
-        pieces.append(audio[fade_len:n - fade_len])
-
-    # Chain: track_end → chunks → track_start
-    prev_tail = audio[:, -fade_len:] if is_stereo else audio[-fade_len:]
-
-    for chunk in bridge_chunks:
-        cn = _n_samples(chunk)
-        chunk_fade = min(fade_len, cn // 2)
-
-        if is_stereo:
-            chunk_head = chunk[:, :chunk_fade]
-            chunk_body = chunk[:, chunk_fade:cn - chunk_fade]
-            chunk_tail = chunk[:, -chunk_fade:]
-        else:
-            chunk_head = chunk[:chunk_fade]
-            chunk_body = chunk[chunk_fade:cn - chunk_fade]
-            chunk_tail = chunk[-chunk_fade:]
-
-        # Crossfade previous tail → this chunk's head
-        xf = _xfade(prev_tail, chunk_head)
-        pieces.append(xf)
-        pieces.append(chunk_body)
-        prev_tail = chunk_tail
-
-    # Final crossfade: last chunk tail → track start (loop point)
-    track_head = audio[:, :fade_len] if is_stereo else audio[:fade_len]
-    pieces.append(_xfade(prev_tail, track_head))
-
-    if is_stereo:
-        return np.concatenate(pieces, axis=1)
-    else:
-        return np.concatenate(pieces)
 
 
 def crossfade_loop(audio, crossfade_samples):
@@ -423,12 +203,10 @@ def find_best_crossfade(audio, sample_rate):
 def main():
     parser = argparse.ArgumentParser(description="Post-process a music track for seamless looping.")
     parser.add_argument("input", help="Input audio file")
-    parser.add_argument("--mode", choices=["crossfade", "fade", "trim", "bridge", "trim-bridge"], default="crossfade",
+    parser.add_argument("--mode", choices=["crossfade", "fade", "trim"], default="crossfade",
                         help="Loop strategy: crossfade (equal-power blend end→start), "
                              "fade (fade out then fade in through silence), "
-                             "trim (find best matching region and cut), "
-                             "bridge (clone internal section as loop transition), "
-                             "trim-bridge (trim to best region then bridge the seam) "
+                             "trim (find best matching region and cut) "
                              "(default: crossfade)")
     parser.add_argument("--crossfade-ms", default="2000",
                         help="Crossfade/fade duration in ms, or 'auto' to detect ideal duration (default: 2000)")
@@ -459,12 +237,11 @@ def main():
     auto_crossfade = args.crossfade_ms.lower() == "auto"
     crossfade_ms = 0 if auto_crossfade else int(args.crossfade_ms)
 
-    mode_labels = {"crossfade": "crossfade", "fade": "fade", "trim": "trim", "bridge": "bridge", "trim-bridge": "trim-bridge"}
     params = Table(show_header=False, show_edge=False, pad_edge=False, padding=(0, 2))
     params.add_column(style="bold")
     params.add_column()
     params.add_row("Input", f"[cyan]{args.input}[/cyan]")
-    params.add_row("Mode", f"[cyan]{mode_labels[args.mode]}[/cyan]")
+    params.add_row("Mode", f"[cyan]{args.mode}[/cyan]")
     params.add_row("Fade/crossfade", "[cyan]auto[/cyan]" if auto_crossfade else f"[cyan]{crossfade_ms}ms[/cyan]")
     if args.mode == "fade" and args.silence_ms > 0:
         params.add_row("Silence gap", f"[cyan]{args.silence_ms}ms[/cyan]")
@@ -488,11 +265,9 @@ def main():
         if min_loop <= 0:
             min_loop = max(3.0, original_duration / 3)
         console.print(f"  Scanning for best loop regions (min length: [cyan]{min_loop:.0f}s[/cyan])...")
-        t0 = time.time()
         candidates = find_best_loop_region(audio, sample_rate, min_loop_seconds=min_loop,
                                             top_n=args.top, window_seconds=args.window,
                                             step_seconds=args.step)
-        search_time = time.time() - t0
 
         if not candidates:
             console.print("  [red]No suitable loop regions found[/red]")
@@ -558,143 +333,6 @@ def main():
         silence_samples = int(args.silence_ms * sample_rate / 1000)
         console.print("  Applying fade-out/fade-in...")
         looped = fade_loop(audio, fade_samples, silence_samples)
-
-    elif args.mode == "bridge":
-        console.print(f"  Scanning for bridge chains (window: [cyan]{args.window}s[/cyan], step: [cyan]{args.step}s[/cyan])...")
-        t0 = time.time()
-        candidates = find_bridge(audio, sample_rate, window_seconds=args.window,
-                                 step_seconds=args.step, top_n=args.top)
-        search_time = time.time() - t0
-
-        if not candidates:
-            console.print("  [red]No suitable bridge chains found[/red]")
-            return
-
-        window_samples = int(args.window * sample_rate)
-
-        # Display candidates table
-        console.print()
-        ctable = Table(title="Bridge Candidates", show_edge=False, pad_edge=False, padding=(0, 2))
-        ctable.add_column("", style="bold cyan")
-        ctable.add_column("Hops", justify="right")
-        ctable.add_column("Path", justify="left")
-        ctable.add_column("Added", justify="right")
-        ctable.add_column("Score", justify="right")
-
-        labels = [chr(ord("A") + i) for i in range(len(candidates))]
-        for label, (cscore, path) in zip(labels, candidates):
-            hops = len(path)
-            path_str = " → ".join(f"{p / sample_rate:.1f}s" for p in path)
-            total_added = len(path) * window_samples / sample_rate
-            ctable.add_row(label, str(hops), path_str, f"{total_added:.1f}s", f"{cscore:.3f}")
-
-        console.print(ctable)
-        console.print()
-
-        # Select the picked candidate
-        pick_idx = ord(args.pick.upper()) - ord("A")
-        if pick_idx < 0 or pick_idx >= len(candidates):
-            console.print(f"  [red]Invalid pick '{args.pick}' — valid: {labels[0]}–{labels[-1]}[/red]")
-            return
-
-        match_score, path = candidates[pick_idx]
-        hops = len(path)
-        console.print(f"  Using [bold cyan]{labels[pick_idx]}[/bold cyan]: "
-                      f"{hops} hop{'s' if hops > 1 else ''}, score [cyan]{match_score:.3f}[/cyan]")
-
-        # Extract bridge chunks
-        bridge_chunks = [_slice(audio, p, p + window_samples) for p in path]
-
-        if auto_crossfade:
-            crossfade_ms = min(500, int(args.window * 1000 * 0.25))
-            crossfade_ms = max(crossfade_ms, 100)
-            console.print(f"  Auto crossfade: [cyan]{crossfade_ms}ms[/cyan]")
-
-        crossfade_samples = int(crossfade_ms * sample_rate / 1000)
-        console.print("  Building bridge loop...")
-        looped = build_bridge_loop(audio, bridge_chunks, crossfade_samples)
-
-    elif args.mode == "trim-bridge":
-        # Step 1: Trim — find best loop region
-        min_loop = args.min_loop
-        if min_loop <= 0:
-            min_loop = max(3.0, original_duration / 3)
-        console.print(f"  [bold]Step 1: Trim[/bold] — scanning for loop regions (min: [cyan]{min_loop:.0f}s[/cyan])...")
-        trim_candidates = find_best_loop_region(audio, sample_rate, min_loop_seconds=min_loop,
-                                                 top_n=args.top, window_seconds=args.window,
-                                                 step_seconds=args.step)
-
-        if not trim_candidates:
-            console.print("  [red]No suitable loop regions found[/red]")
-            return
-
-        console.print()
-        ctable = Table(title="Trim Candidates", show_edge=False, pad_edge=False, padding=(0, 2))
-        ctable.add_column("", style="bold cyan")
-        ctable.add_column("Start", justify="right")
-        ctable.add_column("End", justify="right")
-        ctable.add_column("Length", justify="right")
-        ctable.add_column("Score", justify="right")
-
-        labels = [chr(ord("A") + i) for i in range(len(trim_candidates))]
-        for label, (cstart, cend, cscore) in zip(labels, trim_candidates):
-            length = (cend - cstart) / sample_rate
-            ctable.add_row(label, f"{cstart / sample_rate:.2f}s", f"{cend / sample_rate:.2f}s",
-                           f"{length:.1f}s", f"{cscore:.3f}")
-
-        console.print(ctable)
-        console.print()
-
-        pick_idx = ord(args.pick.upper()) - ord("A")
-        if pick_idx < 0 or pick_idx >= len(trim_candidates):
-            console.print(f"  [red]Invalid pick '{args.pick}' — valid: {labels[0]}–{labels[-1]}[/red]")
-            return
-
-        region_start, region_end, trim_score = trim_candidates[pick_idx]
-        trimmed = _slice(audio, region_start, region_end)
-        trim_dur = (region_end - region_start) / sample_rate
-        console.print(f"  Using [bold cyan]{labels[pick_idx]}[/bold cyan]: "
-                      f"[cyan]{region_start / sample_rate:.2f}s[/cyan] → [cyan]{region_end / sample_rate:.2f}s[/cyan] "
-                      f"([cyan]{trim_dur:.1f}s[/cyan], trim score [cyan]{trim_score:.3f}[/cyan])")
-
-        # Step 2: Bridge — find best bridge chain within the trimmed region
-        console.print()
-        console.print("  [bold]Step 2: Bridge[/bold] — scanning for bridge chains...")
-        bridge_candidates = find_bridge(trimmed, sample_rate, window_seconds=args.window,
-                                        step_seconds=args.step, top_n=5)
-
-        window_samples = int(args.window * sample_rate)
-
-        if bridge_candidates:
-            bridge_score, path = bridge_candidates[0]
-            hops = len(path)
-            path_str = " → ".join(f"{p / sample_rate:.1f}s" for p in path)
-            console.print(f"  Best bridge: {hops} hop{'s' if hops > 1 else ''} ({path_str}), "
-                          f"score [cyan]{bridge_score:.3f}[/cyan]")
-
-            bridge_chunks = [_slice(trimmed, p, p + window_samples) for p in path]
-            match_score = (trim_score + bridge_score) / 2
-
-            if auto_crossfade:
-                crossfade_ms = min(500, int(args.window * 1000 * 0.25))
-                crossfade_ms = max(crossfade_ms, 100)
-                console.print(f"  Auto crossfade: [cyan]{crossfade_ms}ms[/cyan]")
-
-            crossfade_samples = int(crossfade_ms * sample_rate / 1000)
-            console.print("  Building bridge loop...")
-            looped = build_bridge_loop(trimmed, bridge_chunks, crossfade_samples)
-
-            crossfade_samples = int(crossfade_ms * sample_rate / 1000)
-            console.print("  Building bridge loop...")
-            looped = build_bridge_loop(trimmed, bridge_audio, crossfade_samples)
-        else:
-            console.print("  [yellow]No bridge found — falling back to crossfade[/yellow]")
-            match_score = trim_score
-            if auto_crossfade:
-                crossfade_ms = find_best_crossfade(trimmed, sample_rate)
-                console.print(f"  Auto crossfade: [cyan]{crossfade_ms}ms[/cyan]")
-            crossfade_samples = int(crossfade_ms * sample_rate / 1000)
-            looped = crossfade_loop(trimmed, crossfade_samples)
 
     else:  # crossfade
         if auto_crossfade:

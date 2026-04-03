@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Generate sound effects from a text prompt using AudioGen."""
+"""Generate sound effects from a text prompt using Stable Audio Open."""
 
 import argparse
 import os
 import time
 
 import numpy as np
+import torch
 from rich.table import Table
 
 from tools.lib.audio_utils import save_audio, compute_peak, compute_rms, highpass_filter
 from tools.lib.console import console, run_with_hf_fallback
-from tools.lib.model_utils import load_audiogen
+from tools.lib.model_utils import load_stable_audio
 
 
 def analyze_spectrum(audio, sample_rate):
@@ -33,8 +34,18 @@ def analyze_spectrum(audio, sample_rate):
         pct = 100 * energy / total_energy if total_energy > 0 else 0
         band_data.append((lo, hi, name, desc, pct))
 
-    mid_high = sum(pct for _, _, name, _, pct in band_data if name in ("Mid", "High-mid"))
-    return band_data, mid_high
+    return band_data
+
+
+def to_mono_numpy_audio(audio):
+    """Convert Stable Audio output to a mono float32 NumPy array."""
+    if isinstance(audio, torch.Tensor):
+        audio = audio.detach().float().cpu().numpy()
+
+    audio = np.asarray(audio, dtype=np.float32)
+    if audio.ndim > 1:
+        audio = audio.mean(axis=0)
+    return audio
 
 
 def print_analysis(audio, sample_rate, highpass_hz, file_size, gen_time, device):
@@ -44,7 +55,7 @@ def print_analysis(audio, sample_rate, highpass_hz, file_size, gen_time, device)
     rms = compute_rms(audio)
     db_peak = 20 * np.log10(peak) if peak > 0 else -np.inf
     db_rms = 20 * np.log10(rms) if rms > 0 else -np.inf
-    band_data, _ = analyze_spectrum(audio, sample_rate)
+    band_data = analyze_spectrum(audio, sample_rate)
 
     console.print()
     console.print("  [bold dim]Audio Properties[/bold dim]")
@@ -94,24 +105,22 @@ def print_analysis(audio, sample_rate, highpass_hz, file_size, gen_time, device)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate sound effects from a text prompt using AudioGen.")
+    parser = argparse.ArgumentParser(description="Generate sound effects from a text prompt using Stable Audio Open.")
     parser.add_argument("prompt", help="Text description of the sound effect to generate")
     parser.add_argument("--duration", type=float, default=3.0,
                         help="Duration in seconds (default: 3)")
-    parser.add_argument("--model-size", choices=["medium"], default="medium",
-                        help="Model size (default: medium)")
-    parser.add_argument("--temperature", type=float, default=1.0,
-                        help="Sampling temperature — higher = more varied (default: 1.0)")
-    parser.add_argument("--guidance-scale", type=float, default=3.0,
-                        help="Classifier-free guidance — higher = closer to prompt (default: 3.0)")
-    parser.add_argument("--top-k", type=int, default=250,
-                        help="Top-k sampling (default: 250)")
-    parser.add_argument("--top-p", type=float, default=0.92,
-                        help="Nucleus sampling threshold (default: 0.92)")
+    parser.add_argument("--steps", type=int, default=100,
+                        help="Number of inference steps — higher = better quality, slower (default: 100)")
+    parser.add_argument("--guidance-scale", type=float, default=7.0,
+                        help="Classifier-free guidance — higher = closer to prompt (default: 7.0)")
+    parser.add_argument("--negative-prompt", default="low quality, noise, distortion",
+                        help="Negative prompt to steer away from (default: 'low quality, noise, distortion')")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility (default: random)")
     parser.add_argument("--highpass", type=float, default=0,
                         help="High-pass filter cutoff in Hz, 0 to disable (default: 0)")
     parser.add_argument("--count", type=int, default=1,
-                        help="Generate N variants and keep the best (default: 1)")
+                        help="Generate N variants and keep the best by RMS energy (default: 1)")
     parser.add_argument("--output", default=None, help="Output file path (default: ./tmp/gen_sfx/output.wav)")
     args = parser.parse_args()
 
@@ -127,10 +136,11 @@ def main():
     params.add_column()
     params.add_row("Prompt", f"[cyan]{args.prompt}[/cyan]")
     params.add_row("Duration", f"[cyan]{args.duration}s[/cyan]")
-    params.add_row("Model", f"[cyan]audiogen-{args.model_size}[/cyan]")
-    params.add_row("Temperature", f"[cyan]{args.temperature}[/cyan]")
+    params.add_row("Model", "[cyan]stable-audio-open-1.0[/cyan]")
+    params.add_row("Steps", f"[cyan]{args.steps}[/cyan]")
     params.add_row("Guidance", f"[cyan]{args.guidance_scale}[/cyan]")
-    params.add_row("Top-k / Top-p", f"[cyan]{args.top_k}[/cyan] / [cyan]{args.top_p}[/cyan]")
+    if args.seed is not None:
+        params.add_row("Seed", f"[cyan]{args.seed}[/cyan]")
     if args.highpass > 0:
         params.add_row("Highpass", f"[cyan]{args.highpass}Hz[/cyan]")
     if args.count > 1:
@@ -141,39 +151,35 @@ def main():
 
     console.print("  Loading model...")
     t0 = time.time()
-    model, processor = run_with_hf_fallback(load_audiogen, args.model_size)
+    pipe = run_with_hf_fallback(load_stable_audio)
     load_time = time.time() - t0
     console.print(f"  Model loaded in [cyan]{load_time:.1f}s[/cyan]")
 
-    sample_rate = model.config.audio_encoder.sampling_rate
-    max_new_tokens = int(args.duration * 50)
-    device = str(model.device)
-
-    gen_kwargs = {
-        "max_new_tokens": max_new_tokens,
-        "temperature": args.temperature,
-        "do_sample": True,
-        "guidance_scale": args.guidance_scale,
-        "top_k": args.top_k,
-        "top_p": args.top_p,
-    }
+    sample_rate = int(pipe.vae.sampling_rate)
+    device = str(pipe.device)
+    generator = torch.Generator(device=device).manual_seed(args.seed) if args.seed is not None else None
 
     results = []
     for i in range(args.count):
         label = f" ({i + 1}/{args.count})" if args.count > 1 else ""
         console.print(f"  Generating{label}...")
         t0 = time.time()
-        inputs = processor(text=[args.prompt], padding=True, return_tensors="pt")
-        inputs = inputs.to(model.device)
-        audio_values = model.generate(**inputs, **gen_kwargs)
+        result = pipe(
+            args.prompt,
+            negative_prompt=args.negative_prompt,
+            num_inference_steps=args.steps,
+            audio_end_in_s=args.duration,
+            guidance_scale=args.guidance_scale,
+            generator=generator,
+        )
         gen_time = time.time() - t0
 
-        audio = audio_values[0, 0].cpu().numpy()
+        audio = to_mono_numpy_audio(result.audios[0])
         if args.highpass > 0:
             audio = highpass_filter(audio, sample_rate, cutoff_hz=args.highpass)
 
-        _, quality_score = analyze_spectrum(audio, sample_rate)
-        results.append({"audio": audio, "gen_time": gen_time, "quality": quality_score})
+        rms = compute_rms(audio)
+        results.append({"audio": audio, "gen_time": gen_time, "rms": rms})
 
     if args.count > 1:
         console.print()
@@ -184,19 +190,17 @@ def main():
         rank_table.add_column("#", justify="right", style="bold")
         rank_table.add_column("Peak", justify="right")
         rank_table.add_column("RMS", justify="right")
-        rank_table.add_column("Mid+High", justify="right")
         rank_table.add_column("Time", justify="right")
         rank_table.add_column("")
 
-        best_idx = int(np.argmax([r["quality"] for r in results]))
+        best_idx = int(np.argmax([r["rms"] for r in results]))
 
         for i, r in enumerate(results):
             peak = compute_peak(r["audio"])
-            rms = compute_rms(r["audio"])
             marker = " [bold green]← best[/bold green]" if i == best_idx else ""
             rank_table.add_row(
-                str(i + 1), f"{peak:.3f}", f"{rms:.4f}",
-                f"{r['quality']:.0f}%", f"{r['gen_time']:.1f}s", marker,
+                str(i + 1), f"{peak:.3f}", f"{r['rms']:.4f}",
+                f"{r['gen_time']:.1f}s", marker,
             )
             variant_path = output.replace(".wav", f"_{i + 1}.wav")
             save_audio(variant_path, r["audio"], sample_rate)

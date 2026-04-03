@@ -1,4 +1,4 @@
-"""AudioCraft model loading utilities for SoundForge tools (via HuggingFace transformers)."""
+"""Model loading utilities for SoundForge tools."""
 
 import torch
 
@@ -30,19 +30,42 @@ def load_musicgen(model_size: str = "small"):
     return model, processor
 
 
-def load_audiogen(model_size: str = "medium"):
-    """Load an AudioGen model via transformers.
-
-    Args:
-        model_size: Model size (currently only "medium" is available).
+def load_qwen2_audio():
+    """Load Qwen2-Audio-7B-Instruct for audio understanding.
 
     Returns:
-        A tuple of (model, processor) ready for generation.
+        A tuple of (model, processor) ready for audio analysis.
+        Audio input must be 16kHz mono. Outputs text descriptions.
     """
-    from transformers import AutoProcessor, AutoModelForTextToWaveform
+    from transformers import Qwen2AudioForConditionalGeneration, AutoProcessor
 
-    model_name = f"facebook/audiogen-{model_size}"
-    processor = AutoProcessor.from_pretrained(model_name)
-    model = AutoModelForTextToWaveform.from_pretrained(model_name)
+    model_name = "Qwen/Qwen2-Audio-7B-Instruct"
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+    model = Qwen2AudioForConditionalGeneration.from_pretrained(
+        model_name, torch_dtype=torch.float16, trust_remote_code=True
+    )
     model = model.to(get_device())
     return model, processor
+
+
+def load_stable_audio(model_name: str = "stabilityai/stable-audio-open-1.0"):
+    """Load a Stable Audio Open pipeline via diffusers for sound effect generation.
+
+    Args:
+        model_name: HuggingFace model identifier.
+
+    Returns:
+        The StableAudioPipeline ready for generation.
+    """
+    from diffusers import StableAudioPipeline, DPMSolverMultistepScheduler
+
+    device = get_device()
+    dtype = torch.float32 if device == "cpu" else torch.float16
+    pipe = StableAudioPipeline.from_pretrained(model_name, torch_dtype=dtype)
+
+    # The default CosineDPMSolverMultistepScheduler uses torchsde for SDE sampling,
+    # which hits a RecursionError on MPS (Apple Silicon). Swap to a non-SDE scheduler.
+    pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+
+    pipe = pipe.to(device)
+    return pipe
